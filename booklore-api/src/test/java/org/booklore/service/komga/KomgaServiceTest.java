@@ -16,19 +16,26 @@ import org.booklore.repository.LibraryRepository;
 import org.booklore.service.MagicShelfService;
 import org.booklore.service.appsettings.AppSettingService;
 import org.booklore.service.reader.CbxReaderService;
+import org.booklore.service.reader.PdfReaderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.io.Resource;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -49,6 +56,9 @@ class KomgaServiceTest {
     
     @Mock
     private CbxReaderService cbxReaderService;
+
+    @Mock
+    private PdfReaderService pdfReaderService;
     
     @Mock
     private AppSettingService appSettingService;
@@ -245,5 +255,122 @@ class KomgaServiceTest {
         // Verify that only books for Series A and B were loaded (optimization check)
         verify(bookRepository, never()).findAllWithMetadataByLibraryId(anyLong());
         verify(bookRepository, never()).findAllWithMetadata();
+    }
+
+    @Test
+    void shouldGetBookPageImageForPdfWithoutConversion() throws IOException {
+        // Given
+        Long bookId = 1L;
+        Integer pageNumber = 1;
+        byte[] dummyData = "dummy pdf data".getBytes();
+        
+        BookEntity book = new BookEntity();
+        book.setId(bookId);
+        BookFileEntity fileEntity = new BookFileEntity();
+        fileEntity.setBookType(BookFileType.PDF);
+        book.setBookFiles(List.of(fileEntity));
+        
+        when(bookRepository.findById(bookId)).thenReturn(Optional.of(book));
+        
+        doAnswer(invocation -> {
+            ByteArrayOutputStream out = invocation.getArgument(2);
+            out.write(dummyData);
+            return null;
+        }).when(pdfReaderService).streamPageImage(eq(bookId), eq(pageNumber), any(ByteArrayOutputStream.class));
+
+        // When
+        Resource result = komgaService.getBookPageImage(bookId, pageNumber, false);
+
+        // Then
+        assertThat(result).isNotNull();
+        assertThat(result.getInputStream().readAllBytes()).isEqualTo(dummyData);
+        verify(pdfReaderService).getAvailablePages(bookId);
+        verify(pdfReaderService).streamPageImage(eq(bookId), eq(pageNumber), any(ByteArrayOutputStream.class));
+        verifyNoInteractions(cbxReaderService);
+    }
+
+    @Test
+    void shouldGetBookPageImageForCbxWithoutConversion() throws IOException {
+        // Given
+        Long bookId = 2L;
+        Integer pageNumber = 1;
+        byte[] dummyData = "dummy cbx data".getBytes();
+        
+        BookEntity book = new BookEntity();
+        book.setId(bookId);
+        BookFileEntity fileEntity = new BookFileEntity();
+        fileEntity.setBookType(BookFileType.CBX);
+        book.setBookFiles(List.of(fileEntity));
+        
+        when(bookRepository.findById(bookId)).thenReturn(Optional.of(book));
+        
+        doAnswer(invocation -> {
+            ByteArrayOutputStream out = invocation.getArgument(2);
+            out.write(dummyData);
+            return null;
+        }).when(cbxReaderService).streamPageImage(eq(bookId), eq(pageNumber), any(ByteArrayOutputStream.class));
+
+        // When
+        Resource result = komgaService.getBookPageImage(bookId, pageNumber, false);
+
+        // Then
+        assertThat(result).isNotNull();
+        assertThat(result.getInputStream().readAllBytes()).isEqualTo(dummyData);
+        verify(cbxReaderService).getAvailablePages(bookId);
+        verify(cbxReaderService).streamPageImage(eq(bookId), eq(pageNumber), any(ByteArrayOutputStream.class));
+        verifyNoInteractions(pdfReaderService);
+    }
+
+    @Test
+    void shouldGetBookPageImageWithPngConversion() throws IOException {
+        // Given
+        Long bookId = 3L;
+        Integer pageNumber = 1;
+        
+        // Create a valid dummy image
+        BufferedImage img = new BufferedImage(10, 10, BufferedImage.TYPE_INT_RGB);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(img, "jpg", baos);
+        byte[] jpegData = baos.toByteArray();
+        
+        BookEntity book = new BookEntity();
+        book.setId(bookId);
+        BookFileEntity fileEntity = new BookFileEntity();
+        fileEntity.setBookType(BookFileType.CBX);
+        book.setBookFiles(List.of(fileEntity));
+        
+        when(bookRepository.findById(bookId)).thenReturn(Optional.of(book));
+        
+        doAnswer(invocation -> {
+            ByteArrayOutputStream out = invocation.getArgument(2);
+            out.write(jpegData);
+            return null;
+        }).when(cbxReaderService).streamPageImage(eq(bookId), eq(pageNumber), any(ByteArrayOutputStream.class));
+
+        // When
+        Resource result = komgaService.getBookPageImage(bookId, pageNumber, true);
+
+        // Then
+        assertThat(result).isNotNull();
+        byte[] resultBytes = result.getInputStream().readAllBytes();
+        
+        // Verify it is a PNG (check magic bytes for PNG: 89 50 4E 47 0D 0A 1A 0A)
+        assertThat(resultBytes.length).isGreaterThan(8);
+        assertThat(resultBytes[0]).isEqualTo((byte) 0x89);
+        assertThat(resultBytes[1]).isEqualTo((byte) 0x50); // P
+        assertThat(resultBytes[2]).isEqualTo((byte) 0x4E); // N
+        assertThat(resultBytes[3]).isEqualTo((byte) 0x47); // G
+    }
+
+    @Test
+    void shouldThrowExceptionWhenBookNotFoundForPageImage() {
+        // Given
+        Long bookId = 999L;
+        when(bookRepository.findById(bookId)).thenReturn(Optional.empty());
+
+        // When/Then
+        assertThrows(RuntimeException.class, () -> 
+            komgaService.getBookPageImage(bookId, 1, false)
+        );
     }
 }
